@@ -58,8 +58,8 @@
 
 	Analog Pins
 
-	Pin A0 - input of feedback positioning from motor 1
-	Pin A1 - input of feedback positioning from motor 2
+	Pin A4 - input of feedback positioning from motor 1
+	Pin A5 - input of feedback positioning from motor 2
 
 	As well 5v and GND pins tapped in to feed feedback pots too.
 
@@ -90,7 +90,7 @@
 int firmaware_version_mayor=1;
 int firmware_version_minor =4;
 
-//360° option for flight simulators
+//360ï¿½ option for flight simulators
 bool turn360motor1 = false;
 bool turn360motor2 = false;
 
