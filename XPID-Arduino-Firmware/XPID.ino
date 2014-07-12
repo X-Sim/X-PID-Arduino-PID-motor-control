@@ -1,8 +1,63 @@
 /*
-	X-Sim PID
-	This program will control two motor H-Bridge with analogue feedback and serial target input value
-	Target is a Arduino UNO R3 but should work on all Arduino with Atmel 328, Arduinos with an FTDI serial chip need a change to lower baudrates of 57600
-	Copyright (c) 2013 Martin Wiedenbauer, particial use is only allowed with a reference link to the x-sim.de project
+	X-Sim PID - Moto Monster Edition Firmware
+	Copyright (c) 2014 Martin Wiedenbauer, particial use is only allowed with a reference link to the x-sim.de project
+
+	This firmware comes with a X-SIM GUI (Graphically User Interface = X-Sim Plugin) interface and easy setup interface to play around 
+	with PID values. It is designed for	users with less knowlege about programming and that want to simple upload and use the firmware. 
+	After loading this firmware to the arduino, the firmware is detected in the interface setup automatically on any USB port.
+	Do not forget to clean the X-Sim Converter USO setup. If you have loaded another 3rd party firmware before, you might block the comport.
+	Same for the X-Sim Extractor OBD2 setup, remove the Moto Monster arduino comport from the list.
+	It comes with many additionally	features like brake, 360°, GUI for pot scaling, power disable options etc. to get all the X-Sim features.
+	This program will control the Moto Monster Shield of Sparksfun, with a analogue pot feedback, compared to a serial target input value from X-Sim
+	You can get this H-Bridge easy and cheap from eBay.
+	Target is a Arduino UNO R3 but will work on all Arduino with Atmel 328.
+	This means, Arduino nano, micro, Duemilanove and UNO are tested. The moto monster shield does mechanically only be plug'n'play with UNO and Duemilanove, else you must wire it.
+	Arduinos with an FTDI serial chip need a change to lower baudrates of 9600 bit/s.
+	Read the below code and comment or uncomment the needed baudrate option with a double slash (//).
+
+	Help for wiring the Moto Monster Shield
+
+	Motor Pins (on Moto Monster Shield)
+
+	JP3 VCC - 12V from power supply
+	JP3 GND - GND from power supply
+	JP1 OUTA1 - connect to Motor A
+	JP1 OUTB1 - connect to Motor A
+	JP2 OUTA2 - connect to Motor B
+	JP2 OUTB2 - connect to Motor B
+
+	You may switch the two cables to the motor if you see that the feedback is not working (motor move in wrong direction).
+	Instead of switch the motor cable you can of course switch the +5V and GND cable of the pot which do the same.
+	If the motor control is working but you must change the direction, you have to simple switch pot and motor cables.
+
+	Analog Pins, must be connected not to the Moto Monster Shield but to a feedback pot connected to the motor axis
+
+	Pin A4 - input of feedback positioning from motor A, wire here the feedback pot middle pin
+	Pin A5 - input of feedback positioning from motor B, wire here the feedback pot middle pin
+	         Other pot pins go to +5V and GND of arduino.
+
+	Important:
+	Do not wire a motor monster GND power supply pin with GND of arduino or the pot!
+	Use a heatsink on the VNH2SP30 chips on the motor monster shield. Maybe a fan is additionally attached.
+	Start with a low PWM frequency setup in the X-Sim GUI. The PWM setup is only for reducing hearable switching noise.
+
+
+	Pin out setup of arduino for Moto Monster Shield of SparksFun (needed only for programming and understanding code)
+
+	Pin  5 - PWMA - Speed for Motor 1. 
+	Pin  6 - PWMB - Speed for Motor 2.
+	Pin  4 - INA1 - motor 2 turn 
+	Pin  7 - INA2 - motor 1 turn
+	Pin  8 - INB1 - motor 1 turn
+	Pin  9 - INB2 - motor 2 turn
+	Pin A0 - ENA  - current status input (not used)
+	Pin A1 - ENB  - current status input (not used)
+	Pin A2 - CSA  - power sense analogue input for over current detection (not used)
+	Pin A3 - CSB  -	power sense analogue input for over current detection (not used)
+
+	As well 5v and GND pins tapped in to feed feedback pots too.
+
+
 
 	Command input protocol	(always 5 bytes, beginning with 'X' character and ends with a XOR checksum)
 	'X' 1 H L C				Set motor 1 position to High and Low value 0 to 1023
@@ -47,22 +102,6 @@
 	26		pwm2 maximum
 	27		pwm frequency divider (1,8,64)
 
-	Pin out of arduino for H-Bridge
-
-	Pin 10 - PWM1 - Speed for Motor 1. 
-	Pin  9 - PWM2 - Speed for Motor 2.
-	Pin  2 - INA1 - motor 1 turn 
-	Pin  3 - INA2 - motor 1 turn
-	Pin  4 - INB1 - motor 2 turn
-	Pin  5 - INB2 - motor 2 turn
-
-	Analog Pins
-
-	Pin A0 - input of feedback positioning from motor 1
-	Pin A1 - input of feedback positioning from motor 2
-
-	As well 5v and GND pins tapped in to feed feedback pots too.
-
 */
 
 #include <EEPROM.h>
@@ -87,8 +126,8 @@
 #define   GUARD_MOTOR_2_GAIN   100.0
 
 //Firmware version info
-int firmaware_version_mayor=1;
-int firmware_version_minor =4;
+int firmaware_version_mayor=2;
+int firmware_version_minor =0;
 
 //360° option for flight simulators
 bool turn360motor1 = false;
@@ -112,6 +151,23 @@ int commandbuffer[5]={0};
 unsigned long pidcount	= 0;		// unsigned 32bit, 0 to 4,294,967,295
 byte errorcount	= 0;		// serial receive error detected by checksum
 
+//Atmel chip port number for direct port manipulation
+//http://arduino.cc/en/Hacking/PinMapping
+#define ATMELA 0
+#define ATMELB 1
+#define ATMELC 2
+#define ATMELD 3
+#define ATMELE 4
+#define ATMELF 5
+//Structure for direct port manipulation data
+struct mp
+{
+	int port;			//Atmel port, not Arduino
+	int *portstatus;	//Pointer to current register value
+	int pinnumber;		//Pinnumber of port at Atmel chip, not the arduino digital port!
+	int arduino_pin;	//For I/O setup with arduino framework
+};
+
 // fixed DATA for direct port manipulation, exchange here each value if your h-Bridge is connected to another port pin
 // This pinning overview is to avoid the slow pin switching of the arduino libraries
 // 
@@ -133,30 +189,36 @@ byte errorcount	= 0;		// serial receive error detected by checksum
 //                  +----+
 // 
 int portdstatus				=PORTD; 	// read the current port D bit mask
-int ControlPinM1Inp1		=2;			// motor 1 INP1 output, this is the arduino pin description
-int ControlPinM1Inp2		=3;			// motor 1 INP2 output, this is the arduino pin description
-int ControlPinM2Inp1		=4;			// motor 2 INP1 output, this is the arduino pin description
-int ControlPinM2Inp2		=5;			// motor 2 INP2 output, this is the arduino pin description
-int PWMPinM1				=10;		// motor 1 PWM output
-int PWMPinM2				=9;			// motor 2 PWM output
+int portbstatus				=PORTB; 	// read the current port B bit mask
+//Fill the pin swaping for direct port manipulation
+//http://arduino.cc/en/Hacking/PinMapping
+//Warning: using arduinos digitawrite() instead of using port manipulation will decrease the PID update rate and will heat up the H-BRIDGE because directions are both enabled
+//Following structure: Atmel chip port name, pointer to portstatus variable for store old values, Atmel portpin, Arduino digital portpin for I/O setup
+mp ControlPinM1Inp1	={ATMELD,&portdstatus,7,7}; // motor A INP1 output, this is the atmel chip pin description, PortD7, InA1 Motor1 clockwise, Arduino Pin 7
+mp ControlPinM1Inp2	={ATMELB,&portbstatus,0,8}; // motor A INP2 output, this is the atmel chip pin description, PortB0, InB1 Motor1 counterclockwise, Arduino Pin 8
+mp ControlPinM2Inp1	={ATMELD,&portdstatus,4,4}; // motor B INP1 output, this is the atmel chip pin description, PortD4, InA2 Motor2 clockwise, Arduino Pin 4
+mp ControlPinM2Inp2 ={ATMELB,&portbstatus,1,9}; // motor B INP2 output, this is the atmel chip pin description, PortB1, InB2 Motor2 counterclockwise, Arduino Pin 9
+int PWMPinM1				=5;			// motor A PWM output
+int PWMPinM2				=6;			// motor B PWM output
 
 // Pot feedback inputs
-int FeedbackPin1			= A0;		// select the input pin for the potentiometer 1, PC0
-int FeedbackPin2			= A1;		// select the input pin for the potentiometer 2, PC1
+int FeedbackPin1			= A4;		// select the input pin for the potentiometer 1, port PC4 on atmel chip
+int FeedbackPin2			= A5;		// select the input pin for the potentiometer 2, port PC5 on atmel chip
 int FeedbackMax1			= 1021;		// Maximum position of pot 1 to scale, do not use 1023 because it cannot control outside the pot range
 int FeedbackMin1			= 2;		// Minimum position of pot 1 to scale, do not use 0 because it cannot control outside the pot range
 int FeedbackMax2			= 1021;		// Maximum position of pot 2 to scale, do not use 1023 because it cannot control outside the pot range
 int FeedbackMin2			= 2;		// Minimum position of pot 2 to scale, do not use 0 because it cannot control outside the pot range
 int FeedbackPotDeadZone1	= 0;		// +/- of this value will not move the motor		
 int FeedbackPotDeadZone2	= 0;		// +/- of this value will not move the motor
+// 360° Case detection border values
 float quarter1				= 254.75;
 float quarter2				= 254.75;
 float threequarter1			= 764.25;
 float threequarter2			= 764.25;
 
 //PID variables
-int motordirection1		= 0;			// motor 1 move direction 0=brake, 1=forward, 2=reverse
-int motordirection2		= 0;			// motor 2 move direction 0=brake, 1=forward, 2=reverse
+int motordirection1		= 0;			// motor A move direction 0=brake, 1=forward, 2=reverse
+int motordirection2		= 0;			// motor B move direction 0=brake, 1=forward, 2=reverse
 int oldmotordirection1	= 0;
 int oldmotordirection2	= 0;
 double K_motor_1		= 1;
@@ -235,10 +297,11 @@ void setup()
 	//Serial.begin(115200);   //Uncomment this for arduino UNO without ftdi serial chip
 	Serial.begin(9600);  //Uncomment this for arduino nano, arduino with ftdi chip or arduino duemilanove
 	portdstatus=PORTD;
-	pinMode(ControlPinM1Inp1, OUTPUT);
-	pinMode(ControlPinM1Inp2, OUTPUT);
-	pinMode(ControlPinM2Inp1, OUTPUT);
-	pinMode(ControlPinM2Inp2, OUTPUT);
+	portbstatus=PORTB;
+	pinMode(ControlPinM1Inp1.arduino_pin, OUTPUT);
+	pinMode(ControlPinM1Inp2.arduino_pin, OUTPUT);
+	pinMode(ControlPinM2Inp1.arduino_pin, OUTPUT);
+	pinMode(ControlPinM2Inp2.arduino_pin, OUTPUT);
 	pinMode(PWMPinM1,		  OUTPUT);
 	pinMode(PWMPinM2,		  OUTPUT);
 	analogWrite(PWMPinM1,	  0);
@@ -249,8 +312,8 @@ void setup()
 	UnsetMotor2Inp2();
 	disable=1;
 	//TCCR1B = TCCR1B & 0b11111100; //This is a hack for changing the PWM frequency to a higher value, if removed it is 490Hz
-	setPwmFrequency(9, 1);
-	setPwmFrequency(10, 1);
+	setPwmFrequency(PWMPinM1, 1);
+	setPwmFrequency(PWMPinM2, 1);
 #if FASTADC
 	// set analogue prescale to 16
 	sbi(ADCSRA,ADPS2) ;
@@ -366,8 +429,8 @@ void ReadEEProm()
 	quarter2=float(FeedbackMax2-FeedbackMin2)/4.000;
 	threequarter1=quarter1*3.000;
 	threequarter2=quarter1*3.000;
-	setPwmFrequency(9, pwmfrequencydivider);
-	setPwmFrequency(10, pwmfrequencydivider);
+	setPwmFrequency(5, pwmfrequencydivider);
+	setPwmFrequency(6, pwmfrequencydivider);
 }
 
 void SendAnalogueFeedback(int analogue1, int analogue2)
@@ -695,50 +758,58 @@ void SetPWM()
 
 void SetMotor1Inp1()
 {
-	portdstatus |= 1 << ControlPinM1Inp1;
-	PORTD = portdstatus;
+	*ControlPinM1Inp1.portstatus |= 1 << ControlPinM1Inp1.pinnumber;
+	if(ControlPinM1Inp1.port==ATMELB){PORTB = *ControlPinM1Inp1.portstatus;}
+	if(ControlPinM1Inp1.port==ATMELD){PORTD = *ControlPinM1Inp1.portstatus;}
 }
 
 void UnsetMotor1Inp1()
 {
-	portdstatus &= ~(1 << ControlPinM1Inp1);
-	PORTD = portdstatus;
+	*ControlPinM1Inp1.portstatus &= ~(1 << ControlPinM1Inp1.pinnumber);
+	if(ControlPinM1Inp1.port==ATMELB){PORTB = *ControlPinM1Inp1.portstatus;}
+	if(ControlPinM1Inp1.port==ATMELD){PORTD = *ControlPinM1Inp1.portstatus;}
 }
 
 void SetMotor1Inp2()
 {
-	portdstatus |= 1 << ControlPinM1Inp2;
-	PORTD = portdstatus;
+	*ControlPinM1Inp2.portstatus |= 1 << ControlPinM1Inp2.pinnumber;
+	if(ControlPinM1Inp2.port==ATMELB){PORTB = *ControlPinM1Inp2.portstatus;}
+	if(ControlPinM1Inp2.port==ATMELD){PORTD = *ControlPinM1Inp2.portstatus;}
 }
 
 void UnsetMotor1Inp2()
 {
-	portdstatus &= ~(1 << ControlPinM1Inp2);
-	PORTD = portdstatus;
+	*ControlPinM1Inp2.portstatus &= ~(1 << ControlPinM1Inp2.pinnumber);
+	if(ControlPinM1Inp2.port==ATMELB){PORTB = *ControlPinM1Inp2.portstatus;}
+	if(ControlPinM1Inp2.port==ATMELD){PORTD = *ControlPinM1Inp2.portstatus;}
 }
 
 void SetMotor2Inp1()
 {
-	portdstatus |= 1 << ControlPinM2Inp1;
-	PORTD = portdstatus;
+	*ControlPinM2Inp1.portstatus |= 1 << ControlPinM2Inp1.pinnumber;
+	if(ControlPinM2Inp1.port==ATMELB){PORTB = *ControlPinM2Inp1.portstatus;}
+	if(ControlPinM2Inp1.port==ATMELD){PORTD = *ControlPinM2Inp1.portstatus;}
 }
 
 void UnsetMotor2Inp1()
 {
-	portdstatus &= ~(1 << ControlPinM2Inp1);
-	PORTD = portdstatus;
+	*ControlPinM2Inp1.portstatus &= ~(1 << ControlPinM2Inp1.pinnumber);
+	if(ControlPinM2Inp1.port==ATMELB){PORTB = *ControlPinM2Inp1.portstatus;}
+	if(ControlPinM2Inp1.port==ATMELD){PORTD = *ControlPinM2Inp1.portstatus;}
 }
 
 void SetMotor2Inp2()
 {
-	portdstatus |= 1 << ControlPinM2Inp2;
-	PORTD = portdstatus;
+	*ControlPinM2Inp2.portstatus |= 1 << ControlPinM2Inp2.pinnumber;
+	if(ControlPinM2Inp2.port==ATMELB){PORTB = *ControlPinM2Inp2.portstatus;}
+	if(ControlPinM2Inp2.port==ATMELD){PORTD = *ControlPinM2Inp2.portstatus;}
 }
 
 void UnsetMotor2Inp2()
 {
-	portdstatus &= ~(1 << ControlPinM2Inp2);
-	PORTD = portdstatus;
+	*ControlPinM2Inp2.portstatus &= ~(1 << ControlPinM2Inp2.pinnumber);
+	if(ControlPinM2Inp2.port==ATMELB){PORTB = *ControlPinM2Inp2.portstatus;}
+	if(ControlPinM2Inp2.port==ATMELD){PORTD = *ControlPinM2Inp2.portstatus;}
 }
 
 void SetHBridgeControl() //With direct port manipulation for speedup the arduino framework!
